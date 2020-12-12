@@ -8,15 +8,17 @@ import com.ctre.phoenix.motorcontrol.can.WPI_TalonFX;
 
 import edu.wpi.first.wpilibj.SpeedController;
 import edu.wpi.first.wpilibj.SpeedControllerGroup;
+import edu.wpi.first.wpilibj.command.Scheduler;
 import edu.wpi.first.wpilibj.controller.PIDController;
 import edu.wpi.first.wpilibj.drive.DifferentialDrive;
+import edu.wpi.first.wpilibj2.command.CommandScheduler;
 import edu.wpi.first.wpilibj2.command.SubsystemBase;
 import frc.robot.Robot;
 import frc.robot.operator.controllers.BionicF310;
 
 public class Drivetrain extends SubsystemBase {
 
-    private final int TICKS_PER_ROTATION = 2048; //prev. 1440
+    private final int TICKS_PER_ROTATION = 2048; //prev. 1440 - Link: http://www.ctr-electronics.com/talon-fx.html#product_tabs_tech_specs 
     private final int TIMEOUT_MS = 30; // The amount of time the Roborio watis before it sends a failed signal back to
                                        // the Driver Station
     private final int PID_INDEX = 0; // The index for witch pid index to use (0 for primary, 1 for auxilliary)
@@ -30,24 +32,26 @@ public class Drivetrain extends SubsystemBase {
     private final int MAX_CRUISE_VELOCITY = 15000;
     private final int MAX_CRUISE_ACCEL = 6000; //TODO test values.
     private final double SENSOR_UNITS = 0;
+    private final int MAX_RPM = 6380;
 
-    
+    //Formula from https://readthedocs.org/projects/phoenix-documentation/downloads/pdf/latest/ pg 149
+    private final int CRUISE_VELOCITY = (MAX_RPM / 2 / 600) * TICKS_PER_ROTATION;
+    private final int CRUISE_ACCELERATION = CRUISE_VELOCITY / 2; // last number dictates how long it'll take us to get to max speed.
+    private final int SMOOTHING = 3; //0 -> 8: CHOOSE WITH TESTING. TODO May be controlled by a button.
+
+    private double lastDriveSpeed = 0;
 
     private final double K_P = 0.25; // A gain of 0.25 maximizes the motor output when the error is one revolution.
     private final double K_I = 0;
     private final double K_D = 0;
 
-    private double length;
-    private double width;
     private WPI_TalonFX left_front, left_back, right_front, right_back;
     private SpeedController m_left, m_right;
     private SpeedControllerGroup left_side, right_side;
     private DifferentialDrive diffDrive;
     private PIDController pidController;
 
-    public Drivetrain(double l, double w, int idbl, int idfl, int idfr, int idbr) {
-        this.length = l;
-        this.width = w;
+    public Drivetrain(int idbl, int idfl, int idfr, int idbr) {
         this.left_front = new WPI_TalonFX(idfl);
         this.right_front = new WPI_TalonFX(idfr);
         this.right_back = new WPI_TalonFX(idbr);
@@ -138,17 +142,21 @@ public class Drivetrain extends SubsystemBase {
         right_front.setSelectedSensorPosition(SENSOR_POS);
         right_back.setSelectedSensorPosition(SENSOR_POS);
 
-        //Sets acceleration adndnnd cruise velocity << motion magic
-        /*
-        * left_front.configMotionCruiseVelocity(SENSOR_UNITS, TIMEOUT_MS);
-        * left_back.configMotionCruiseVelocity(SENSOR_UNITS, TIMEOUT_MS);
-        * right_front.configMotionCruiseVelocity(SENSOR_UNITS, TIMEOUT_MS);
-        * right_back.configMotionCruiseVelocity(SENSOR_UNITS, TIMEOUT_MS);
+        //Sets acceleration and cruise velocity << motion magic
+        left_front.configMotionCruiseVelocity(CRUISE_VELOCITY, TIMEOUT_MS);
+        left_back.configMotionCruiseVelocity(CRUISE_VELOCITY, TIMEOUT_MS);
+        right_front.configMotionCruiseVelocity(CRUISE_VELOCITY, TIMEOUT_MS);
+        right_back.configMotionCruiseVelocity(CRUISE_VELOCITY, TIMEOUT_MS);
 
-        * left_front.configMotionAcceleration(sensorUnitsPer100msPerSec)
-        */
+        left_front.configMotionAcceleration(CRUISE_ACCELERATION, TIMEOUT_MS);
+        left_back.configMotionAcceleration(CRUISE_ACCELERATION, TIMEOUT_MS);
+        right_front.configMotionAcceleration(CRUISE_ACCELERATION, TIMEOUT_MS);
+        right_back.configMotionAcceleration(CRUISE_ACCELERATION, TIMEOUT_MS);
 
-
+        left_front.configMotionSCurveStrength(SMOOTHING);
+        left_back.configMotionSCurveStrength(SMOOTHING);
+        right_front.configMotionSCurveStrength(SMOOTHING);
+        right_back.configMotionSCurveStrength(SMOOTHING);
     }
 
     /*
@@ -165,10 +173,25 @@ public class Drivetrain extends SubsystemBase {
 
     //Make the robot move and turn. Used for manual control
     public void driveManual(double speed, double rotation){
+
         diffDrive.arcadeDrive(speed, rotation);
+        
+    }
+
+    public void driveManualWithRamp(double speed, double rotation){
+
+        // TODO test the ramping
+        if(Math.abs(speed - lastDriveSpeed) >= 0.5){ // TODO make a constant
+            speed += Math.signum(speed - lastDriveSpeed) * 0.5;
+        }
+        
+        diffDrive.arcadeDrive(speed, rotation);
+        //setting the last speed (20 ms before) of the drivetrain to lastDriveSpeed
+        lastDriveSpeed = speed;
     }
     
-    //Make the robot drive a certain amout of feet forward along a given arc
+
+    //Make the robot drive a certain amout of feet forward along a given arc - UNUSED
     public void driveDistanceArc(double speed, double rotation_deg, double distance) { // Distance is in feet
         
         // Create known arc.
@@ -186,7 +209,6 @@ public class Drivetrain extends SubsystemBase {
         
         left_front.set(ControlMode.Position, lCurrentEncoderPos + ticksToMove);
         right_front.set(ControlMode.Position, rCurrentEncoderPos + ticksToMove);
-
     }
 
     public void driveDistanceMagic(double distance) {
@@ -227,8 +249,13 @@ public class Drivetrain extends SubsystemBase {
             //TODO ? Arcade drive periodic
 
             //do what the joystick says
-            diffDrive.arcadeDrive(Robot.driverGamepad.getThresholdAxis(BionicF310.LY), Robot.driverGamepad.getThresholdAxis(BionicF310.LX));
-        
+            // Scheduler scheduler = Scheduler.getInstance();
+            this.driveManual(Robot.driverGamepad.getThresholdAxis(BionicF310.LY), Robot.driverGamepad.getThresholdAxis(BionicF310.LX));
+            // returns null
+            // Command currentCommand = CommandScheduler.getInstance().requiring(this);
+            // CommandScheduler.getInstance().
+            // https://docs.wpilib.org/en/stable/docs/software/commandbased/command-scheduler.html
+            
         }
     
     }
